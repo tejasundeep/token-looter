@@ -129,6 +129,54 @@ class TestTokenLooterHeadless(unittest.TestCase):
         err = make_provider_http_error(mock_response, "Rate limit hit")
         self.assertEqual(err.retry_after_ms, 12500.0)
 
+    def test_persistent_key_states(self):
+        from app.ratelimit import set_cooldown, is_on_cooldown, set_global_key_disabled, is_key_globally_disabled
+        
+        # Test cooldown persistence
+        set_cooldown("test_plat", "test_mod", "test_key", 5000)
+        self.assertTrue(is_on_cooldown("test_plat", "test_mod", "test_key"))
+        
+        # Test global key disable persistence
+        set_global_key_disabled("test_plat", "test_key", 5000)
+        self.assertTrue(is_key_globally_disabled("test_plat", "test_key"))
+
+    def test_in_flight_token_reservations(self):
+        from app.ratelimit import increment_in_flight, decrement_in_flight, can_use_tokens
+        platform, model, key = "test_res_platform", "test_res_model", "test_res_key"
+        
+        increment_in_flight(platform, model, key, tokens=100)
+        
+        # Verify can_use_tokens checks in-flight tokens
+        # If limit is 150, used is 0, in-flight is 100, asking for 60 should fail (100 + 60 > 150)
+        limits = {"rpm": None, "rpd": None, "tpm": 150, "tpd": None}
+        self.assertFalse(can_use_tokens(platform, model, key, estimated_tokens=60, limits=limits))
+        self.assertTrue(can_use_tokens(platform, model, key, estimated_tokens=40, limits=limits))
+        
+        decrement_in_flight(platform, model, key, tokens=100)
+        self.assertTrue(can_use_tokens(platform, model, key, estimated_tokens=60, limits=limits))
+
+    def test_get_next_chunk_safely_disconnect(self):
+        import asyncio
+        from app.v1_endpoints import get_next_chunk_safely
+        
+        # Setup mock request
+        mock_request = MagicMock()
+        mock_request.is_disconnected = AsyncMock(return_value=True)
+        
+        # Setup slow mock generator
+        async def dummy_gen():
+            await asyncio.sleep(5)
+            yield {"text": "hello"}
+            
+        gen = dummy_gen()
+        
+        async def run_test():
+            await get_next_chunk_safely(gen, mock_request)
+            
+        # Expect CancelledError
+        with self.assertRaises(asyncio.CancelledError):
+            asyncio.run(run_test())
+
 if __name__ == "__main__":
     unittest.main()
 

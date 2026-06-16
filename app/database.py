@@ -107,6 +107,16 @@ def create_tables(db):
       request_type TEXT NOT NULL DEFAULT 'chat'
     );
     """)
+    db.execute("""
+    CREATE TABLE IF NOT EXISTS key_states (
+      platform TEXT NOT NULL,
+      key_id TEXT NOT NULL,
+      model_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      expires_at REAL NOT NULL,
+      PRIMARY KEY (platform, key_id, model_id)
+    );
+    """)
     db.commit()
 
 _keys_cache = None

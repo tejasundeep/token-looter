@@ -37,21 +37,26 @@ def ensure_models_loaded() -> None:
         if current_mtime == _models_last_mtime:
             return
             
-        try:
-            with open(DUMP_PATH, 'r', encoding='utf-8') as f:
-                dump_data = json.load(f)
-                models_list = dump_data.get("models", [])
-                embed_list = dump_data.get("embedding_models", [])
-                
-                MODELS_DATA.clear()
-                MODELS_DATA.extend(models_list)
-                
-                EMBEDDING_MODELS.clear()
-                EMBEDDING_MODELS.extend(embed_list)
-                
-                _models_last_mtime = current_mtime
-        except Exception as e:
-            print("[Router] Failed to dynamically load models list:", e)
+        for attempt in range(3):
+            try:
+                with open(DUMP_PATH, 'r', encoding='utf-8') as f:
+                    dump_data = json.load(f)
+                    models_list = dump_data.get("models", [])
+                    embed_list = dump_data.get("embedding_models", [])
+                    
+                    MODELS_DATA.clear()
+                    MODELS_DATA.extend(models_list)
+                    
+                    EMBEDDING_MODELS.clear()
+                    EMBEDDING_MODELS.extend(embed_list)
+                    
+                    _models_last_mtime = current_mtime
+                    return
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(0.05)
+                else:
+                    print("[Router] Failed to dynamically load models list after retries:", e)
 
 # Initial load
 ensure_models_loaded()

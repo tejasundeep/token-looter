@@ -186,6 +186,10 @@ def log_request(
                     LIMIT -1 OFFSET ?
                 )
             """, (max_rows,))
+        
+        # Prune expired key states
+        now_ms = time.time() * 1000.0
+        db.execute("DELETE FROM key_states WHERE expires_at < ?", (now_ms,))
         db.commit()
     except Exception as e:
         print(f"Failed to prune request analytics: {e}")
@@ -395,6 +399,36 @@ class ChatCompletionRequest(BaseModel):
     class Config:
         extra = "ignore"
 
+async def get_next_chunk_safely(gen, request: Optional[Request]) -> Any:
+    if not request:
+        return await gen.__anext__()
+
+    chunk_task = asyncio.create_task(gen.__anext__())
+    
+    async def watch_disconnect():
+        try:
+            while not chunk_task.done():
+                if await request.is_disconnected():
+                    chunk_task.cancel()
+                    break
+                await asyncio.sleep(0.2)
+        except asyncio.CancelledError:
+            pass
+
+    watch_task = asyncio.create_task(watch_disconnect())
+    
+    try:
+        await asyncio.wait([chunk_task, watch_task], return_when=asyncio.FIRST_COMPLETED)
+        if chunk_task.done() and not chunk_task.cancelled():
+            return chunk_task.result()
+        else:
+            raise asyncio.CancelledError("Client disconnected")
+    finally:
+        if not chunk_task.done():
+            chunk_task.cancel()
+        if not watch_task.done():
+            watch_task.cancel()
+
 async def stream_generator(
     first_chunk: Dict[str, Any],
     gen,
@@ -410,7 +444,8 @@ async def stream_generator(
     strategyKey: Optional[str],
     tools: Optional[List[Dict[str, Any]]],
     start_time: float,
-    request: Optional[Request] = None
+    request: Optional[Request] = None,
+    reserved_tokens: int = 0
 ):
     total_output_tokens = 0
     ttfb_ms = None
@@ -440,8 +475,8 @@ async def stream_generator(
                 idx += 1
             else:
                 try:
-                    chunk = await gen.__anext__()
-                except StopAsyncIteration:
+                    chunk = await get_next_chunk_safely(gen, request)
+                except (StopAsyncIteration, asyncio.CancelledError):
                     break
                     
             any_chunk = chunk
@@ -664,7 +699,7 @@ async def stream_generator(
                     estimated_input_tokens, total_output_tokens, latency_ms,
                     sanitize_provider_error_message(str(stream_err)), ttfb_ms, pinned_model_id)
     finally:
-        decrement_in_flight(route["platform"], route["modelId"], route["keyId"])
+        decrement_in_flight(route["platform"], route["modelId"], route["keyId"], reserved_tokens)
 
 @v1_router.post("/chat/completions")
 async def post_v1_chat_completions(request: Request):
@@ -919,7 +954,7 @@ async def post_v1_chat_completions(request: Request):
         in_flight_incremented = False
         try:
             if body.stream:
-                increment_in_flight(route["platform"], route["modelId"], route["keyId"])
+                increment_in_flight(route["platform"], route["modelId"], route["keyId"], routing_estimate)
                 in_flight_incremented = True
                 gen = await route["provider"].stream_chat_completion(
                     api_key=route["apiKey"],
@@ -964,13 +999,14 @@ async def post_v1_chat_completions(request: Request):
                         strategyKey=strategy_key,
                         tools=tools_dict_list,
                         start_time=start_time,
-                        request=request
+                        request=request,
+                        reserved_tokens=routing_estimate
                     ),
                     media_type="text/event-stream",
                     headers=headers
                 )
             else:
-                increment_in_flight(route["platform"], route["modelId"], route["keyId"])
+                increment_in_flight(route["platform"], route["modelId"], route["keyId"], routing_estimate)
                 in_flight_incremented = True
                 result = await route["provider"].chat_completion(
                     api_key=route["apiKey"],
@@ -1104,6 +1140,8 @@ async def post_v1_chat_completions(request: Request):
                 record_rate_limit_hit(route["modelDbId"])
                 last_error = err
                 print(f"[Proxy] {safe_error[:60]} from {route['displayName']}, falling back (attempt {attempt + 1}/{MAX_RETRIES})")
+                import random
+                await asyncio.sleep(random.uniform(0.05, 0.15))
                 continue
                 
             raise HTTPException(status_code=502, detail={
@@ -1114,7 +1152,7 @@ async def post_v1_chat_completions(request: Request):
             })
         finally:
             if in_flight_incremented:
-                decrement_in_flight(route["platform"], route["modelId"], route["keyId"])
+                decrement_in_flight(route["platform"], route["modelId"], route["keyId"], routing_estimate)
 
             
     if last_error:
@@ -1302,7 +1340,9 @@ async def responses_stream_generator(
     tools: Optional[List[Dict[str, Any]]],
     response_id: str,
     start_time: float,
-    skip_keys: Set[str]
+    skip_keys: Set[str],
+    request: Optional[Request] = None,
+    reserved_tokens: int = 0
 ):
     seq = 0
     stream_started = False
@@ -1345,13 +1385,17 @@ async def responses_stream_generator(
     try:
         idx = 0
         while True:
+            if request and await request.is_disconnected():
+                print(f"[Proxy] Client disconnected. Stopping responses stream generator.")
+                return
+
             if idx < len(chunks):
                 chunk = chunks[idx]
                 idx += 1
             else:
                 try:
-                    chunk = await gen.__anext__()
-                except StopAsyncIteration:
+                    chunk = await get_next_chunk_safely(gen, request)
+                except (StopAsyncIteration, asyncio.CancelledError):
                     break
                     
             any_chunk = chunk
@@ -1513,7 +1557,7 @@ async def responses_stream_generator(
         else:
             raise stream_err
     finally:
-        decrement_in_flight(route["platform"], route["modelId"], route["keyId"])
+        decrement_in_flight(route["platform"], route["modelId"], route["keyId"], reserved_tokens)
 
 @v1_router.post("/responses")
 async def post_v1_responses(request: Request):
@@ -1597,7 +1641,7 @@ async def post_v1_responses(request: Request):
         in_flight_incremented = False
         try:
             if body.stream:
-                increment_in_flight(route["platform"], route["modelId"], route["keyId"])
+                increment_in_flight(route["platform"], route["modelId"], route["keyId"], estimated_total)
                 in_flight_incremented = True
                 gen = await route["provider"].stream_chat_completion(
                     api_key=route["apiKey"],
@@ -1632,13 +1676,15 @@ async def post_v1_responses(request: Request):
                         tools=tools,
                         response_id=response_id,
                         start_time=start_time,
-                        skip_keys=skip_keys
+                        skip_keys=skip_keys,
+                        request=request,
+                        reserved_tokens=estimated_total
                     ),
                     media_type="text/event-stream",
                     headers=headers
                 )
             else:
-                increment_in_flight(route["platform"], route["modelId"], route["keyId"])
+                increment_in_flight(route["platform"], route["modelId"], route["keyId"], estimated_total)
                 in_flight_incremented = True
                 result = await route["provider"].chat_completion(
                     api_key=route["apiKey"],
@@ -1735,12 +1781,14 @@ async def post_v1_responses(request: Request):
                 set_cooldown(route["platform"], route["modelId"], route["keyId"], cooldown_duration)
                 record_rate_limit_hit(route["modelDbId"])
                 last_error = err
+                import random
+                await asyncio.sleep(random.uniform(0.05, 0.15))
                 continue
                 
             raise HTTPException(status_code=502, detail={"error": {"message": f"Provider error ({route['displayName']}): {safe_error}", "type": "provider_error"}})
         finally:
             if in_flight_incremented:
-                decrement_in_flight(route["platform"], route["modelId"], route["keyId"])
+                decrement_in_flight(route["platform"], route["modelId"], route["keyId"], estimated_total)
 
             
     exhausted_msg = f"All models rate-limited after {MAX_RETRIES} attempts. Last: {str(last_error)}"
