@@ -1,4 +1,5 @@
 import os
+import time
 import json
 import sqlite3
 import threading
@@ -34,6 +35,7 @@ def get_db():
         conn = sqlite3.connect(str(_db_path), check_same_thread=False, uri=True)
         conn.row_factory = dict_factory
         conn.execute('PRAGMA foreign_keys = ON')
+        conn.execute('PRAGMA busy_timeout = 5000')
         if ':memory:' not in str(_db_path) and 'mode=memory' not in str(_db_path):
             try:
                 conn.execute('PRAGMA journal_mode = WAL')
@@ -58,8 +60,12 @@ def init_db(db_path=None):
     _main_db = sqlite3.connect(str(resolved_path), check_same_thread=False, uri=True)
     _main_db.row_factory = dict_factory
     
+    _main_db.execute('PRAGMA busy_timeout = 5000')
     if not is_memory:
-        _main_db.execute('PRAGMA journal_mode = WAL')
+        try:
+            _main_db.execute('PRAGMA journal_mode = WAL')
+        except sqlite3.OperationalError:
+            pass
     _main_db.execute('PRAGMA foreign_keys = ON')
 
     create_tables(_main_db)
@@ -121,15 +127,23 @@ def load_keys_json() -> dict:
         if _keys_cache is not None and current_mtime == _keys_last_mtime:
             return _keys_cache
 
-        try:
-            with open(KEYS_JSON_PATH, 'r', encoding='utf-8') as f:
-                _keys_cache = json.load(f)
-                _keys_last_mtime = current_mtime
-                return _keys_cache
-        except Exception:
-            if _keys_cache is not None:
-                return _keys_cache
-            return {"unified_api_key": "tokenlooter_secret_key_here", "providers": {}}
+        # Attempt to read keys with up to 3 retries if there is a transient JSON parsing/write lock failure
+        for attempt in range(3):
+            try:
+                with open(KEYS_JSON_PATH, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    _keys_cache = data
+                    _keys_last_mtime = current_mtime
+                    return _keys_cache
+            except Exception:
+                if attempt < 2:
+                    time.sleep(0.05) # wait 50ms for concurrent write to complete
+                else:
+                    break
+        
+        if _keys_cache is not None:
+            return _keys_cache
+        return {"unified_api_key": "tokenlooter_secret_key_here", "providers": {}}
 
 
 def get_unified_api_key() -> str:
@@ -139,4 +153,5 @@ def get_unified_api_key() -> str:
 def get_provider_keys(platform: str) -> list:
     data = load_keys_json()
     return data.get("providers", {}).get(platform, [])
+
 

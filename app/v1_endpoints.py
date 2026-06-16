@@ -228,6 +228,7 @@ def is_retryable_error(err: Exception) -> bool:
         or "413" in msg or "payload too large" in msg or "request body too large" in msg
         or "request entity too large" in msg or "content too large" in msg
         or "404" in msg or "not found" in msg or "no endpoints found" in msg
+        or "401" in msg or "unauthorized" in msg or "invalid api key" in msg or "invalid_key" in msg
         or is_model_access_forbidden_error(err)
         or "api error 400" in msg
         or is_payment_required_error(err)
@@ -408,7 +409,8 @@ async def stream_generator(
     sessionIdHeader: Optional[str],
     strategyKey: Optional[str],
     tools: Optional[List[Dict[str, Any]]],
-    start_time: float
+    start_time: float,
+    request: Optional[Request] = None
 ):
     total_output_tokens = 0
     ttfb_ms = None
@@ -429,6 +431,10 @@ async def stream_generator(
     try:
         idx = 0
         while True:
+            if request and await request.is_disconnected():
+                print(f"[Proxy] Client disconnected. Stopping stream generator.")
+                return
+
             if idx < len(chunks):
                 chunk = chunks[idx]
                 idx += 1
@@ -957,7 +963,8 @@ async def post_v1_chat_completions(request: Request):
                         sessionIdHeader=sessionIdHeader,
                         strategyKey=strategy_key,
                         tools=tools_dict_list,
-                        start_time=start_time
+                        start_time=start_time,
+                        request=request
                     ),
                     media_type="text/event-stream",
                     headers=headers
@@ -980,6 +987,23 @@ async def post_v1_chat_completions(request: Request):
                 )
                 
                 choices = result.get("choices", [])
+                finish_reason = choices[0].get("finish_reason") if choices else None
+                if finish_reason == "content_filter":
+                    total_tokens = result.get("usage", {}).get("total_tokens", 0)
+                    record_request(route["platform"], route["modelId"], route["keyId"])
+                    record_tokens(route["platform"], route["modelId"], route["keyId"], total_tokens)
+                    record_success(route["modelDbId"])
+                    set_sticky_model(norm_messages, route["modelDbId"], sessionIdHeader, strategy_key)
+                    if handoff_mode != 'off' and session_key:
+                        record_successful_model(session_key=session_key, model_key=model_key)
+                    
+                    latency_ms = int((time.time() - start_time) * 1000)
+                    log_request(route["platform"], route["modelId"], route["keyId"], 'success',
+                                result.get("usage", {}).get("prompt_tokens", 0),
+                                result.get("usage", {}).get("completion_tokens", 0),
+                                latency_ms, "content_filter triggered", None, pinned_model_id)
+                    return JSONResponse(content=result, headers={"X-Routed-Via": f"{route['platform']}/{route['modelId']}"})
+
                 resp_msg = choices[0].get("message") if choices else None
                 resp_text = content_to_string(resp_msg.get("content") or "") if resp_msg else ""
                 
@@ -1060,7 +1084,13 @@ async def post_v1_chat_completions(request: Request):
                 skip_keys.add(skip_id)
                 
                 if is_payment_required_error(err):
+                    from app.ratelimit import set_global_key_disabled
+                    set_global_key_disabled(route["platform"], route["keyId"], PAYMENT_REQUIRED_COOLDOWN_MS)
                     cooldown_duration = PAYMENT_REQUIRED_COOLDOWN_MS
+                elif "401" in str(err).lower() or "unauthorized" in str(err).lower() or "invalid api key" in str(err).lower() or "invalid_key" in str(err).lower():
+                    from app.ratelimit import set_global_key_disabled
+                    set_global_key_disabled(route["platform"], route["keyId"], 24 * 60 * 60 * 1000)
+                    cooldown_duration = 24 * 60 * 60 * 1000
                 elif is_model_access_forbidden_error(err):
                     cooldown_duration = MODEL_FORBIDDEN_COOLDOWN_MS
                 else:

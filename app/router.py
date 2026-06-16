@@ -3,7 +3,7 @@ import json
 import threading
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Set, Tuple
-from app.database import get_provider_keys
+from app.database import get_provider_keys, get_db
 from app.providers import get_provider, has_provider, resolve_provider
 from app.providers.base import BaseProvider
 from app.ratelimit import can_make_request, can_use_tokens, is_on_cooldown, can_use_provider, get_in_flight_count
@@ -69,8 +69,57 @@ def get_routing_strategy() -> str:
     return 'priority'
 
 def order_chain(chain: List[Dict[str, Any]], strategy: str = 'priority') -> List[Dict[str, Any]]:
-    # Simply sort by the priority defined in dump.json
-    return sorted(chain, key=lambda x: x.get("priority", 999))
+    # Dynamic routing based on real-time success rate and latency metrics from SQLite (last 10 minutes)
+    import datetime
+    
+    recent_metrics = {}
+    try:
+        db = get_db()
+        cutoff_sec = time.time() - 600
+        cutoff_str = datetime.datetime.fromtimestamp(cutoff_sec, tz=datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+        cursor = db.execute("""
+            SELECT platform, model_id, status, AVG(latency_ms) as avg_lat, COUNT(*) as cnt
+            FROM requests
+            WHERE created_at >= ?
+            GROUP BY platform, model_id, status
+        """, (cutoff_str,))
+        rows = cursor.fetchall()
+        for row in rows:
+            key = f"{row['platform']}:{row['model_id']}"
+            if key not in recent_metrics:
+                recent_metrics[key] = {"success": 0, "error": 0, "latency": 0.0}
+            if row["status"] == 'success':
+                recent_metrics[key]["success"] += row["cnt"]
+                recent_metrics[key]["latency"] = row["avg_lat"] or 0.0
+            else:
+                recent_metrics[key]["error"] += row["cnt"]
+    except Exception:
+        pass
+
+    def get_sort_key(entry: Dict[str, Any]):
+        base_priority = entry.get("priority", 999)
+        key = f"{entry['platform']}:{entry['model_id']}"
+        metrics = recent_metrics.get(key)
+        if not metrics:
+            return base_priority
+            
+        success = metrics["success"]
+        error = metrics["error"]
+        total = success + error
+        
+        penalty = 0.0
+        if total > 0:
+            error_rate = error / total
+            penalty += error_rate * 50.0  # Add penalty for error rate
+            
+            avg_latency = metrics["latency"]
+            if avg_latency > 3000:
+                penalty += min(20.0, (avg_latency - 3000) / 1000.0) # Add penalty for high latency
+                
+        return base_priority + penalty
+
+    return sorted(chain, key=get_sort_key)
+
 
 
 def get_active_chain(db=None) -> List[Dict[str, Any]]:

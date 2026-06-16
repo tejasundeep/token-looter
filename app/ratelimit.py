@@ -11,6 +11,7 @@ _token_windows: Dict[str, List[Dict[str, Any]]] = {}
 
 # Cooldown structures
 _cooldowns: Dict[str, float] = {} # key -> expiry timestamp ms
+_global_disabled_keys: Dict[str, float] = {} # "platform:key_id" -> expiry timestamp ms
 
 MINUTE = 60 * 1000
 PAYMENT_REQUIRED_COOLDOWN_MS = 24 * 60 * 60 * 1000
@@ -105,9 +106,27 @@ def can_use_tokens(
 
     return True
 
+def set_global_key_disabled(platform: str, key_id: Any, duration_ms: float) -> None:
+    disabled_key = f"{platform}:{key_id}"
+    now = time.time() * 1000
+    with _lock:
+        _global_disabled_keys[disabled_key] = now + duration_ms
+
+def is_key_globally_disabled(platform: str, key_id: Any) -> bool:
+    disabled_key = f"{platform}:{key_id}"
+    now = time.time() * 1000
+    with _lock:
+        expiry = _global_disabled_keys.get(disabled_key)
+        if expiry is not None:
+            if now > expiry:
+                _global_disabled_keys.pop(disabled_key, None)
+                return False
+            return True
+    return False
+
 def can_use_provider(platform: str, key_id: Any) -> bool:
-    # Keeps it simple: no global provider daily request cap, let keys handle limits
-    return True
+    return not is_key_globally_disabled(platform, key_id)
+
 
 def set_cooldown(platform: str, model_id: str, key_id: Any, duration_ms: float = 60000) -> None:
     cooldown_key = f"{platform}:{model_id}:{key_id}"
