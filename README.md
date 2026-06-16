@@ -52,6 +52,7 @@ Create a `keys.json` file in the root folder of the project containing your unif
 ```bash
 # Start the server on port 3001
 uvicorn app.main:app --host 0.0.0.0 --port 3001
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 ## Environment Variables
