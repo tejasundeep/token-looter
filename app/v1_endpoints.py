@@ -17,7 +17,8 @@ from app.database import get_db, get_unified_api_key
 from app.ratelimit import (
     can_make_request, can_use_tokens, is_on_cooldown, can_use_provider,
     record_request, record_tokens, set_cooldown, get_cooldown_duration_for_limit,
-    PAYMENT_REQUIRED_COOLDOWN_MS
+    PAYMENT_REQUIRED_COOLDOWN_MS,
+    increment_in_flight, decrement_in_flight
 )
 from app.router import (
     route_request, resolve_routing_chain, record_rate_limit_hit, record_success,
@@ -198,7 +199,17 @@ def is_model_access_forbidden_error(err: Exception) -> bool:
 
 def is_payment_required_error(err: Exception) -> bool:
     msg = str(err).lower()
-    return "402" in msg or "payment required" in msg or "insufficient_quota" in msg or "insufficient credit" in msg or "insufficient balance" in msg
+    return (
+        "402" in msg or 
+        "payment required" in msg or 
+        "insufficient_quota" in msg or 
+        "insufficient credit" in msg or 
+        "insufficient balance" in msg or
+        "quota exceeded" in msg or
+        "billing" in msg or
+        "insufficient funds" in msg
+    )
+
 
 def is_model_not_found_error(err: Exception) -> bool:
     msg = str(err).lower()
@@ -646,6 +657,8 @@ async def stream_generator(
         log_request(route["platform"], route["modelId"], route["keyId"], 'error',
                     estimated_input_tokens, total_output_tokens, latency_ms,
                     sanitize_provider_error_message(str(stream_err)), ttfb_ms, pinned_model_id)
+    finally:
+        decrement_in_flight(route["platform"], route["modelId"], route["keyId"])
 
 @v1_router.post("/chat/completions")
 async def post_v1_chat_completions(request: Request):
@@ -897,8 +910,11 @@ async def post_v1_chat_completions(request: Request):
             if injected:
                 print(f"[Proxy] Context handoff injected (session {session_key[:8]}..., model switch detected)")
             
+        in_flight_incremented = False
         try:
             if body.stream:
+                increment_in_flight(route["platform"], route["modelId"], route["keyId"])
+                in_flight_incremented = True
                 gen = await route["provider"].stream_chat_completion(
                     api_key=route["apiKey"],
                     messages=outbound_messages,
@@ -925,6 +941,7 @@ async def post_v1_chat_completions(request: Request):
                 if attempt > 0:
                     headers["X-Fallback-Attempts"] = str(attempt)
                     
+                in_flight_incremented = False # stream_generator will clean it up
                 return StreamingResponse(
                     stream_generator(
                         first_chunk=first_chunk,
@@ -946,6 +963,8 @@ async def post_v1_chat_completions(request: Request):
                     headers=headers
                 )
             else:
+                increment_in_flight(route["platform"], route["modelId"], route["keyId"])
+                in_flight_incremented = True
                 result = await route["provider"].chat_completion(
                     api_key=route["apiKey"],
                     messages=outbound_messages,
@@ -1008,6 +1027,7 @@ async def post_v1_chat_completions(request: Request):
                 headers = {
                     "X-Routed-Via": f"{route['platform']}/{route['modelId']}"
                 }
+
                 if attempt > 0:
                     headers["X-Fallback-Attempts"] = str(attempt)
                     
@@ -1062,6 +1082,10 @@ async def post_v1_chat_completions(request: Request):
                     "type": "provider_error"
                 }
             })
+        finally:
+            if in_flight_incremented:
+                decrement_in_flight(route["platform"], route["modelId"], route["keyId"])
+
             
     if last_error:
         safe_last_error = sanitize_provider_error_message(str(last_error))
@@ -1458,6 +1482,8 @@ async def responses_stream_generator(
             yield sse('response.failed', {"response": {"id": response_id, "object": "response", "status": "failed", "error": {"message": exhausted_msg, "type": "stream_error"}}})
         else:
             raise stream_err
+    finally:
+        decrement_in_flight(route["platform"], route["modelId"], route["keyId"])
 
 @v1_router.post("/responses")
 async def post_v1_responses(request: Request):
@@ -1538,8 +1564,11 @@ async def post_v1_responses(request: Request):
         except Exception as e:
             raise HTTPException(status_code=500, detail={"error": {"message": str(e), "type": "routing_error"}})
             
+        in_flight_incremented = False
         try:
             if body.stream:
+                increment_in_flight(route["platform"], route["modelId"], route["keyId"])
+                in_flight_incremented = True
                 gen = await route["provider"].stream_chat_completion(
                     api_key=route["apiKey"],
                     messages=messages,
@@ -1560,6 +1589,7 @@ async def post_v1_responses(request: Request):
                     headers["X-Fallback-Attempts"] = str(attempt)
                     
                 stream_started = True
+                in_flight_incremented = False # responses_stream_generator will clean it up
                 return StreamingResponse(
                     responses_stream_generator(
                         first_chunk=first_chunk,
@@ -1578,6 +1608,8 @@ async def post_v1_responses(request: Request):
                     headers=headers
                 )
             else:
+                increment_in_flight(route["platform"], route["modelId"], route["keyId"])
+                in_flight_incremented = True
                 result = await route["provider"].chat_completion(
                     api_key=route["apiKey"],
                     messages=messages,
@@ -1676,6 +1708,10 @@ async def post_v1_responses(request: Request):
                 continue
                 
             raise HTTPException(status_code=502, detail={"error": {"message": f"Provider error ({route['displayName']}): {safe_error}", "type": "provider_error"}})
+        finally:
+            if in_flight_incremented:
+                decrement_in_flight(route["platform"], route["modelId"], route["keyId"])
+
             
     exhausted_msg = f"All models rate-limited after {MAX_RETRIES} attempts. Last: {str(last_error)}"
     raise HTTPException(status_code=429, detail={"error": {"message": exhausted_msg, "type": "rate_limit_error"}})

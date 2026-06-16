@@ -16,12 +16,16 @@ else:
     load_dotenv(dotenv_path=default_env)
 
 from app.database import init_db
+from app.lib.proxy import close_all_clients
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Initialize SQLite database for tracking logs
     db_path = os.environ.get("DATABASE_PATH")
     init_db(db_path)
     yield
+    await close_all_clients()
+
 
 app = FastAPI(lifespan=lifespan, title="token-looter")
 

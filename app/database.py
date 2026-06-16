@@ -103,14 +103,34 @@ def create_tables(db):
     """)
     db.commit()
 
+_keys_cache = None
+_keys_last_mtime = 0.0
+_keys_lock = threading.Lock()
+
 def load_keys_json() -> dict:
+    global _keys_cache, _keys_last_mtime
     if not KEYS_JSON_PATH.exists():
         return {"unified_api_key": "tokenlooter_secret_key_here", "providers": {}}
+        
     try:
-        with open(KEYS_JSON_PATH, 'r', encoding='utf-8') as f:
-            return json.load(f)
+        current_mtime = KEYS_JSON_PATH.stat().st_mtime
     except Exception:
-        return {"unified_api_key": "tokenlooter_secret_key_here", "providers": {}}
+        current_mtime = 0.0
+
+    with _keys_lock:
+        if _keys_cache is not None and current_mtime == _keys_last_mtime:
+            return _keys_cache
+
+        try:
+            with open(KEYS_JSON_PATH, 'r', encoding='utf-8') as f:
+                _keys_cache = json.load(f)
+                _keys_last_mtime = current_mtime
+                return _keys_cache
+        except Exception:
+            if _keys_cache is not None:
+                return _keys_cache
+            return {"unified_api_key": "tokenlooter_secret_key_here", "providers": {}}
+
 
 def get_unified_api_key() -> str:
     data = load_keys_json()

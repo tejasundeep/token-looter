@@ -10,19 +10,12 @@ class EmbeddingsError(Exception):
         super().__init__(message)
         self.status = status
 
-EMBEDDING_MODELS: List[Dict[str, Any]] = []
-try:
-    dump_path = Path(__file__).parent / "dump.json"
-    if dump_path.exists():
-        with open(dump_path, 'r', encoding='utf-8') as f:
-            dump_data = json.load(f)
-            EMBEDDING_MODELS = dump_data.get("embedding_models", [])
-except Exception as e:
-    print("[Embeddings] Failed to load static embedding models list:", e)
+from app.router import EMBEDDING_MODELS, ensure_models_loaded
 
 def list_embedding_models() -> List[Dict[str, Any]]:
-    # Filter EMBEDDING_MODELS statically
+    ensure_models_loaded()
     return EMBEDDING_MODELS
+
 
 def get_default_family() -> str:
     # Static default family for embeddings

@@ -98,5 +98,37 @@ class TestTokenLooterHeadless(unittest.TestCase):
         res = self.client.post("/v1/responses", json={}, headers=self.headers)
         self.assertEqual(res.status_code, 400)
 
+    def test_in_flight_tracking(self):
+        from app.ratelimit import increment_in_flight, decrement_in_flight, get_in_flight_count
+        platform, model, key = "test_platform", "test_model", "test_key"
+        
+        # Test initial count
+        self.assertEqual(get_in_flight_count(platform, model, key), 0)
+        
+        # Increment
+        increment_in_flight(platform, model, key)
+        self.assertEqual(get_in_flight_count(platform, model, key), 1)
+        
+        # Decrement
+        decrement_in_flight(platform, model, key)
+        self.assertEqual(get_in_flight_count(platform, model, key), 0)
+
+    def test_adaptive_cooldown_parsing(self):
+        import httpx
+        from app.providers.base import make_provider_http_error
+        
+        # Simulate response with x-ratelimit-reset header
+        headers = httpx.Headers({
+            "x-ratelimit-reset-requests": "12.5"
+        })
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.status_code = 429
+        mock_response.headers = headers
+        mock_response.reason_phrase = "Too Many Requests"
+        
+        err = make_provider_http_error(mock_response, "Rate limit hit")
+        self.assertEqual(err.retry_after_ms, 12500.0)
+
 if __name__ == "__main__":
     unittest.main()
+

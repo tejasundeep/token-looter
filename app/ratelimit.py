@@ -142,3 +142,24 @@ def clear_persisted_cooldown(platform: str, model_id: str, key_id: Any) -> None:
     cooldown_key = f"{platform}:{model_id}:{key_id}"
     with _lock:
         _cooldowns.pop(cooldown_key, None)
+
+# In-flight request tracking for load balancing
+_in_flight: Dict[str, int] = {}
+
+def increment_in_flight(platform: str, model_id: str, key_id: Any) -> None:
+    cooldown_key = f"{platform}:{model_id}:{key_id}"
+    with _lock:
+        _in_flight[cooldown_key] = _in_flight.get(cooldown_key, 0) + 1
+
+def decrement_in_flight(platform: str, model_id: str, key_id: Any) -> None:
+    cooldown_key = f"{platform}:{model_id}:{key_id}"
+    with _lock:
+        val = _in_flight.get(cooldown_key, 0)
+        if val > 0:
+            _in_flight[cooldown_key] = val - 1
+
+def get_in_flight_count(platform: str, model_id: str, key_id: Any) -> int:
+    cooldown_key = f"{platform}:{model_id}:{key_id}"
+    with _lock:
+        return _in_flight.get(cooldown_key, 0)
+

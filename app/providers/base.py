@@ -29,7 +29,25 @@ def parse_retry_after_ms(value: Optional[str]) -> Optional[float]:
 def make_provider_http_error(response: httpx.Response, message: str) -> ProviderHttpError:
     retry_val = response.headers.get("retry-after")
     retry_ms = parse_retry_after_ms(retry_val)
+    
+    if retry_ms is None:
+        for header_name in ["x-ratelimit-reset-requests", "x-ratelimit-reset-tokens", "x-ratelimit-reset"]:
+            val = response.headers.get(header_name)
+            if val:
+                val = val.strip()
+                if val.replace('.', '', 1).isdigit():
+                    retry_ms = float(val) * 1000.0
+                    break
+                else:
+                    if val.endswith('ms') and val[:-2].strip().isdigit():
+                        retry_ms = float(val[:-2].strip())
+                        break
+                    elif val.endswith('s') and val[:-1].strip().isdigit():
+                        retry_ms = float(val[:-1].strip()) * 1000.0
+                        break
+
     return ProviderHttpError(message, status=response.status_code, retry_after_ms=retry_ms)
+
 
 class BaseProvider(abc.ABC):
     @property

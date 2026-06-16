@@ -6,7 +6,8 @@ from typing import Dict, List, Optional, Any, Set, Tuple
 from app.database import get_provider_keys
 from app.providers import get_provider, has_provider, resolve_provider
 from app.providers.base import BaseProvider
-from app.ratelimit import can_make_request, can_use_tokens, is_on_cooldown, can_use_provider
+from app.ratelimit import can_make_request, can_use_tokens, is_on_cooldown, can_use_provider, get_in_flight_count
+
 
 class RouteError(Exception):
     def __init__(self, message: str, status: int = 429):
@@ -16,18 +17,48 @@ class RouteError(Exception):
 # Thread safety lock
 _router_lock = threading.Lock()
 
-# Static models configuration loaded from dump.json
 MODELS_DATA: List[Dict[str, Any]] = []
-try:
-    dump_path = Path(__file__).parent / "dump.json"
-    if dump_path.exists():
-        with open(dump_path, 'r', encoding='utf-8') as f:
-            dump_data = json.load(f)
-            MODELS_DATA = dump_data.get("models", [])
-except Exception as e:
-    print("[Router] Failed to load static models list:", e)
+EMBEDDING_MODELS: List[Dict[str, Any]] = []
+
+_models_last_mtime = 0.0
+_models_lock = threading.Lock()
+DUMP_PATH = Path(__file__).parent / "dump.json"
+
+def ensure_models_loaded() -> None:
+    global _models_last_mtime
+    if not DUMP_PATH.exists():
+        return
+    try:
+        current_mtime = DUMP_PATH.stat().st_mtime
+    except Exception:
+        current_mtime = 0.0
+        
+    with _models_lock:
+        if current_mtime == _models_last_mtime:
+            return
+            
+        try:
+            with open(DUMP_PATH, 'r', encoding='utf-8') as f:
+                dump_data = json.load(f)
+                models_list = dump_data.get("models", [])
+                embed_list = dump_data.get("embedding_models", [])
+                
+                MODELS_DATA.clear()
+                MODELS_DATA.extend(models_list)
+                
+                EMBEDDING_MODELS.clear()
+                EMBEDDING_MODELS.extend(embed_list)
+                
+                _models_last_mtime = current_mtime
+        except Exception as e:
+            print("[Router] Failed to dynamically load models list:", e)
+
+# Initial load
+ensure_models_loaded()
+
 
 def get_model_by_id(model_id: str) -> Optional[Dict[str, Any]]:
+    ensure_models_loaded()
     return next((m for m in MODELS_DATA if m.get("model_id") == model_id), None)
 
 def record_rate_limit_hit(model_db_id: int) -> None: pass
@@ -43,9 +74,11 @@ def order_chain(chain: List[Dict[str, Any]], strategy: str = 'priority') -> List
 
 
 def get_active_chain(db=None) -> List[Dict[str, Any]]:
+    ensure_models_loaded()
     # Map the dump.json properties to match the expected dict fields
     chain = []
     for idx, m in enumerate(MODELS_DATA):
+
         if not m.get("enabled", 1):
             continue
         chain.append({
@@ -123,9 +156,22 @@ def route_request(
             "tpd": entry["tpd_limit"]
         }
 
-        # Loop keys sequentially: finish first key before moving to next
-        for key_idx, raw_key in enumerate(keys):
-            fake_key_id = f"{entry['platform']}:{key_idx}"
+        # Sort keys primarily by in-flight count (ascending) to distribute concurrent load
+        keys_with_info = []
+        for idx, key in enumerate(keys):
+            fake_key_id = f"{entry['platform']}:{idx}"
+            inflight = get_in_flight_count(entry["platform"], entry["model_id"], fake_key_id)
+            keys_with_info.append({
+                "index": idx,
+                "key": key,
+                "fake_key_id": fake_key_id,
+                "inflight": inflight
+            })
+        keys_with_info.sort(key=lambda x: x["inflight"])
+
+        for k_info in keys_with_info:
+            fake_key_id = k_info["fake_key_id"]
+            raw_key = k_info["key"]
             
             skip_id = f"{entry['platform']}:{entry['model_id']}:{fake_key_id}"
             if skip_keys and skip_id in skip_keys:
@@ -168,9 +214,11 @@ def route_request(
                 "tpdLimit": limits["tpd"]
             }
 
+
     raise RouteError('All models and keys exhausted. Please check your keys.json configuration.', 429)
 
 def get_routing_scores() -> Dict[str, Any]:
+    ensure_models_loaded()
     scores = []
     for idx, m in enumerate(MODELS_DATA):
         scores.append({
@@ -195,7 +243,10 @@ def get_routing_scores() -> Dict[str, Any]:
     }
 
 def has_enabled_vision_model() -> bool:
+    ensure_models_loaded()
     return any(m.get("supports_vision") == 1 for m in MODELS_DATA)
 
 def has_enabled_tools_model() -> bool:
+    ensure_models_loaded()
     return any(m.get("supports_tools") == 1 for m in MODELS_DATA)
+
