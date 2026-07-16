@@ -137,6 +137,35 @@ def set_global_key_disabled(platform: str, key_id: Any, duration_ms: float) -> N
     except Exception as e:
         print(f"Failed to persist disabled key state: {e}")
 
+def sync_states_from_db() -> None:
+    now = time.time() * 1000
+    try:
+        db = get_db()
+        # Clean expired keys from DB first
+        db.execute("DELETE FROM key_states WHERE expires_at < ?", (now,))
+        db.commit()
+        
+        cursor = db.execute("SELECT platform, key_id, model_id, status, expires_at FROM key_states")
+        rows = cursor.fetchall()
+        
+        with _lock:
+            _cooldowns.clear()
+            _global_disabled_keys.clear()
+            for row in rows:
+                platform = row["platform"]
+                key_id = row["key_id"]
+                model_id = row["model_id"]
+                status = row["status"]
+                expires_at = row["expires_at"]
+                
+                if status == 'disabled' and model_id == '*':
+                    _global_disabled_keys[f"{platform}:{key_id}"] = expires_at
+                elif status == 'cooldown':
+                    _cooldowns[f"{platform}:{model_id}:{key_id}"] = expires_at
+    except Exception as e:
+        # Ignore errors during startup / testing if DB is not initialized yet
+        pass
+
 def is_key_globally_disabled(platform: str, key_id: Any) -> bool:
     disabled_key = f"{platform}:{key_id}"
     now = time.time() * 1000
@@ -145,31 +174,9 @@ def is_key_globally_disabled(platform: str, key_id: Any) -> bool:
         if expiry is not None:
             if now > expiry:
                 _global_disabled_keys.pop(disabled_key, None)
+                return False
             else:
                 return True
-
-    try:
-        db = get_db()
-        cursor = db.execute("""
-            SELECT expires_at FROM key_states
-            WHERE platform = ? AND key_id = ? AND model_id = '*' AND status = 'disabled'
-        """, (platform, str(key_id)))
-        row = cursor.fetchone()
-        if row:
-            expiry = row["expires_at"]
-            if now > expiry:
-                db.execute("""
-                    DELETE FROM key_states
-                    WHERE platform = ? AND key_id = ? AND model_id = '*' AND status = 'disabled'
-                """, (platform, str(key_id)))
-                db.commit()
-                return False
-            with _lock:
-                _global_disabled_keys[disabled_key] = expiry
-            return True
-    except Exception as e:
-        print(f"Failed to query disabled key database: {e}")
-
     return False
 
 def can_use_provider(platform: str, key_id: Any) -> bool:
@@ -203,31 +210,9 @@ def is_on_cooldown(platform: str, model_id: str, key_id: Any) -> bool:
         if expiry is not None:
             if now > expiry:
                 _cooldowns.pop(cooldown_key, None)
+                return False
             else:
                 return True
-
-    try:
-        db = get_db()
-        cursor = db.execute("""
-            SELECT expires_at FROM key_states
-            WHERE platform = ? AND key_id = ? AND model_id = ? AND status = 'cooldown'
-        """, (platform, str(key_id), model_id))
-        row = cursor.fetchone()
-        if row:
-            expiry = row["expires_at"]
-            if now > expiry:
-                db.execute("""
-                    DELETE FROM key_states
-                    WHERE platform = ? AND key_id = ? AND model_id = ? AND status = 'cooldown'
-                """, (platform, str(key_id), model_id))
-                db.commit()
-                return False
-            with _lock:
-                _cooldowns[cooldown_key] = expiry
-            return True
-    except Exception as e:
-        print(f"Failed to query key cooldown database: {e}")
-
     return False
 
 def get_cooldown_duration_for_limit(

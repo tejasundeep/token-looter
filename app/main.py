@@ -17,12 +17,14 @@ else:
 
 from app.database import init_db
 from app.lib.proxy import close_all_clients
+from app.ratelimit import sync_states_from_db
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Initialize SQLite database for tracking logs
     db_path = os.environ.get("DATABASE_PATH")
     init_db(db_path)
+    sync_states_from_db()
     yield
     await close_all_clients()
 
