@@ -82,8 +82,6 @@ async def call_provider(row: Dict[str, Any], key: str, inputs: List[str]) -> Dic
     
     if platform == 'google':
         return await open_ai_style_embed('https://generativelanguage.googleapis.com/v1beta/openai/embeddings', key, model_id, inputs, platform)
-    elif platform == 'nvidia':
-        return await open_ai_style_embed('https://integrate.api.nvidia.com/v1/embeddings', key, model_id, inputs, platform, {"input_type": "query"})
     elif platform == 'openrouter':
         return await open_ai_style_embed('https://openrouter.ai/api/v1/embeddings', key, model_id, inputs, platform)
     elif platform == 'github':
@@ -98,66 +96,6 @@ async def call_provider(row: Dict[str, Any], key: str, inputs: List[str]) -> Dic
             f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1/embeddings",
             token, model_id, inputs, platform
         )
-    elif platform == 'huggingface':
-        async with get_httpx_client(platform=platform, timeout=30.0) as client:
-            try:
-                res = await client.post(
-                    f"https://router.huggingface.co/hf-inference/models/{model_id}/pipeline/feature-extraction",
-                    headers={
-                        "Content-Type": "application/json",
-                        "Authorization": f"Bearer {key}"
-                    },
-                    json={"inputs": inputs}
-                )
-            except Exception as e:
-                raise EmbeddingsError(f"upstream connection error: {str(e)}", 502)
-                
-        if res.status_code != 200:
-            raise EmbeddingsError(f"upstream {res.status_code}: {res.text[:200]}", res.status_code)
-            
-        try:
-            j = res.json()
-        except Exception:
-            raise EmbeddingsError("upstream returned invalid JSON", 502)
-            
-        if isinstance(j, list) and len(j) > 0 and isinstance(j[0], list):
-            vectors = j
-        else:
-            vectors = [j]
-            
-        return {"vectors": vectors, "inputTokens": None}
-    elif platform == 'cohere':
-        async with get_httpx_client(platform=platform, timeout=30.0) as client:
-            try:
-                res = await client.post(
-                    'https://api.cohere.com/v2/embed',
-                    headers={
-                        "Content-Type": "application/json",
-                        "Authorization": f"Bearer {key}"
-                    },
-                    json={
-                        "model": model_id,
-                        "texts": inputs,
-                        "input_type": "search_document",
-                        "embedding_types": ["float"]
-                    }
-                )
-            except Exception as e:
-                raise EmbeddingsError(f"upstream connection error: {str(e)}", 502)
-                
-        if res.status_code != 200:
-            raise EmbeddingsError(f"upstream {res.status_code}: {res.text[:200]}", res.status_code)
-            
-        try:
-            j = res.json()
-        except Exception:
-            raise EmbeddingsError("upstream returned invalid JSON", 502)
-            
-        vectors = j.get("embeddings", {}).get("float", [])
-        billed = j.get("meta", {}).get("billed_units", {})
-        input_tokens = billed.get("input_tokens")
-        
-        return {"vectors": vectors, "inputTokens": input_tokens}
     else:
         raise EmbeddingsError(f"no embeddings adapter for platform '{platform}'", 500)
 

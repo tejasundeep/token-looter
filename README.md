@@ -29,21 +29,11 @@ Create a `keys.json` file in the root folder of the project containing your unif
     "google": ["AIzaSy..."],
     "groq": ["abc..."],
     "cerebras": [],
-    "nvidia": [],
-    "mistral": [],
     "openrouter": [],
     "github": [],
-    "cohere": [],
     "cloudflare": [],
     "zhipu": [],
-    "huggingface": [],
-    "ollama": [],
-    "kilo": [],
-    "pollinations": [],
-    "llm7": [],
-    "opencode": [],
-    "ovh": [],
-    "custom": []
+    "llm7": []
   }
 }
 ```

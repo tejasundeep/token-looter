@@ -23,21 +23,11 @@ API keys and gateway authorization tokens are declared in a static `keys.json` f
     "google": ["AIzaSy..."],
     "groq": ["gsk_..."],
     "cerebras": [],
-    "nvidia": [],
-    "mistral": [],
     "openrouter": [],
     "github": [],
-    "cohere": [],
     "cloudflare": [],
     "zhipu": [],
-    "huggingface": [],
-    "ollama": [],
-    "kilo": [],
-    "pollinations": [],
-    "llm7": [],
-    "opencode": [],
-    "ovh": [],
-    "custom": []
+    "llm7": []
   }
 }
 ```

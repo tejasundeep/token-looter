@@ -244,14 +244,6 @@ def route_request(
 
             resolved_provider = provider
             apiKey = raw_key
-            if entry["platform"] == 'custom':
-                sep = raw_key.find('::')
-                if sep != -1:
-                    custom_url = raw_key[:sep]
-                    apiKey = raw_key[sep+2:]
-                    resolved_provider = resolve_provider('custom', custom_url)
-                else:
-                    resolved_provider = resolve_provider('custom', 'https://api.openai.com/v1')
 
             if not resolved_provider:
                 continue

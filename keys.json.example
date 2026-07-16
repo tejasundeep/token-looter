@@ -11,20 +11,11 @@
     "cerebras": [
       "cbs_ExampleCerebrasKey_bb22cc"
     ],
-    "nvidia": [
-      "nvapi-ExampleNvidiaNimKey_ff33dd"
-    ],
-    "mistral": [
-      "ExampleMistralApiKey_ee44ff"
-    ],
     "openrouter": [
       "sk-or-v1-ExampleOpenRouterKey_aa55bb"
     ],
     "github": [
       "ghp_ExampleGitHubToken_cc66dd"
-    ],
-    "cohere": [
-      "ExampleCohereApiKey_ee77ff"
     ],
     "cloudflare": [
       "your_cloudflare_account_id_here:your_cloudflare_api_token_here"
@@ -32,29 +23,8 @@
     "zhipu": [
       "ExampleZhipuApiKey.PartTwo"
     ],
-    "huggingface": [
-      "hf_ExampleHuggingFaceToken_aa88bb"
-    ],
-    "ollama": [
-      "http://localhost:11434"
-    ],
-    "kilo": [
-      "ExampleKiloApiKey_cc99dd"
-    ],
-    "pollinations": [
-      "ExamplePollinationsApiKey_ee00ff"
-    ],
     "llm7": [
       "ExampleLlm7ApiKey_aa11bb"
-    ],
-    "opencode": [
-      "ExampleOpenCodeApiKey_cc22dd"
-    ],
-    "ovh": [
-      "ExampleOvhApiKey_ee33ff"
-    ],
-    "custom": [
-      "https://custom-provider-url.com/v1::ExampleCustomApiKey_ff44gg"
     ]
   }
 }
